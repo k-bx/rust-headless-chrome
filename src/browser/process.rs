@@ -47,12 +47,15 @@ pub(crate) fn get_chrome_path_from_registry() -> Option<std::path::PathBuf> {
         .ok()
 }
 
-struct TemporaryProcess(Child);
+struct TemporaryProcess {
+    pub child: Child,
+    pub m_tempdir: Option<tempfile::TempDir>,
+}
 
 impl Drop for TemporaryProcess {
     fn drop(&mut self) {
-        info!("Killing Chrome. PID: {}", self.0.id());
-        self.0.kill().and_then(|_| self.0.wait()).ok();
+        info!("Killing Chrome. PID: {}", self.child.id());
+        self.child.kill().and_then(|_| self.child.wait()).ok();
     }
 }
 
@@ -192,7 +195,7 @@ impl Process {
 
         let mut process = Self::start_process(&launch_options)?;
 
-        info!("Started Chrome. PID: {}", process.0.id());
+        info!("Started Chrome. PID: {}", process.child.id());
 
         let url;
         let mut attempts = 0;
@@ -201,7 +204,7 @@ impl Process {
                 return Err(ChromeLaunchError::NoAvailablePorts {}.into());
             }
 
-            match Self::ws_url_from_output(process.0.borrow_mut()) {
+            match Self::ws_url_from_output(process.child.borrow_mut()) {
                 Ok(debug_ws_url) => {
                     url = debug_ws_url;
                     debug!("Found debugging WS URL: {:?}", url);
@@ -244,17 +247,21 @@ impl Process {
             String::from("")
         };
 
+        let mut m_tempdir = None;
+
         // User data directory
         let user_data_dir = if let Some(dir) = &launch_options.user_data_dir {
             dir.to_owned()
         } else {
             // picking random data dir so that each a new browser instance is launched
             // (see man google-chrome)
-            ::tempfile::Builder::new()
+
+            let tempdir = ::tempfile::Builder::new()
                 .prefix("rust-headless-chrome-profile")
-                .tempdir()?
-                .path()
-                .to_path_buf()
+                .tempdir()?;
+            let pathbuf = tempdir.path().to_path_buf();
+            m_tempdir = Some(tempdir);
+            pathbuf
         };
         let data_dir_option = format!("--user-data-dir={}", &user_data_dir.to_str().unwrap());
 
@@ -309,7 +316,10 @@ impl Process {
             command.envs(process_envs);
         }
 
-        let process = TemporaryProcess(command.args(&args).stderr(Stdio::piped()).spawn()?);
+        let process = TemporaryProcess {
+            child: command.args(&args).stderr(Stdio::piped()).spawn()?,
+            m_tempdir: m_tempdir,
+        };
         Ok(process)
     }
 
@@ -366,7 +376,7 @@ impl Process {
     }
 
     pub fn get_id(&self) -> u32 {
-        self.child_process.0.id()
+        self.child_process.child.id()
     }
 }
 
